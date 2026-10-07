@@ -1,0 +1,16 @@
+# One CPU-bound AX task in a gVisor actor: prints where it runs, then hashes 1 GiB.
+# Image must contain /usr/local/bin/ax-task-runner (build yours FROM ghcr.io/norandom/ax-task-runner)
+# and be publicly pullable (Substrate's atelet pulls actor images anonymously).
+#
+#   ax apply -f examples/ax/compute-task.yaml
+#   ax watch task compute-1          # stays Running: AX v0.3.1 never marks tasks finished
+#   just ax-logs compute-1           # command output + exit code
+#   ax delete task compute-1
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: compute-1
+  atespace: default
+spec:
+  image: "ghcr.io/norandom/ax-task-runner@sha256:c1c4951ee672ef77f845b2742124f6106b300e433426fde1768381ad5d55fad7"
+  command: ["bash", "-c", "echo cpus=$(nproc) $(grep -m1 -o -w avx2 /proc/cpuinfo); time (head -c 1073741824 /dev/zero | sha256sum)"]

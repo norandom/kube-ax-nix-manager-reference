@@ -1,0 +1,66 @@
+# ax-reaper (tools/ax-reaper): deletes ousast-engine-* tasks 10 minutes after their command exited.
+# Safety net for dispatchers that die before cleaning up (AX v0.3.1 never finishes tasks itself).
+# ${REAPER_IMAGE} is filled in by scripts/platform.sh (step: reaper).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ax-reaper
+  namespace: ax-system
+---
+# Read worker pod logs (exit lines); nothing else in Kubernetes. Tasks are deleted through AX itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ax-reaper
+  namespace: ax-workers
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, get]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ax-reaper
+  namespace: ax-workers
+subjects:
+  - {kind: ServiceAccount, name: ax-reaper, namespace: ax-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ax-reaper}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ax-reaper
+  namespace: ax-system
+  labels: {app: ax-reaper}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: ax-reaper}
+  template:
+    metadata:
+      labels: {app: ax-reaper}
+    spec:
+      serviceAccountName: ax-reaper
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: reaper
+          image: ${REAPER_IMAGE}
+          args:
+            - --prefix=ousast-engine-
+            - --grace=10m
+            - --interval=1m
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

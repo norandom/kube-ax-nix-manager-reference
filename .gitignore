@@ -1,0 +1,19 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Secrets never go into git (see Requirement 9)
+secrets/*
+!secrets/README.md
+
+# Cluster credentials: written by `just kubeconfig` / `just ax-deployer`, never committed
+kubeconfig/*
+!kubeconfig/README.md
+
+# Local caches: upstream checkouts, ko binary, nix build links
+.cache/
+result
+result-*

@@ -1,0 +1,13 @@
+{
+  "routes": [
+    {"prefix": "", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["*"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "ousast-engine-", "policy": null},
+    {"prefix": "ousast-engine-search-exec-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["*"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "ousast-engine-search-verify-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "ousast-engine-search-probe-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "ousast-engine-pass-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "ousast-engine-replay-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com", "github.com"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "egtest-files-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com"], "ports": {"numbers": [443]}}}]}},
+    {"prefix": "egtest-replay-", "policy": {"rules": [{"tlsPassthrough": {"hostnames": ["files.because-security.com", "github.com"], "ports": {"numbers": [443]}}}]}}
+  ]
+}

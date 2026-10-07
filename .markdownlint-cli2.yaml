@@ -1,0 +1,9 @@
+# Docs are read on GitHub; long table rows and inline HTML comments (guide sync markers) are intended.
+config:
+  MD013: false          # line length
+  MD033: false          # inline HTML (<!-- BEGIN ... --> markers)
+  MD060: false          # table column style
+ignores:
+  - .cache/**
+  - .venv/**
+  - .kiro/**

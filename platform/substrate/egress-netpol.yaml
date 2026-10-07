@@ -1,0 +1,40 @@
+# Network-level cap on actor egress: everything actors send leaves through the atenet-egress
+# gateway, so restricting the gateway's own egress bounds what any actor can reach, regardless of
+# what Substrate's policy engine decides. Needed because the v0.3.0 + #2019 backport lets an actor
+# with any policy pass raw TCP to any port (upstream fixes that with listener wiring from #2015,
+# not backported). Allows: ate-api, DNS, telemetry, and public internet on TCP 443 only.
+# Blocks: LAN, cluster pods/services (e.g. AX's unauthenticated Redis/ax-server), other ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: atenet-egress-public-https-only
+  namespace: ate-system
+spec:
+  podSelector:
+    matchLabels: {app: atenet-egress}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app: ate-api-server}}
+      ports: [{protocol: TCP, port: 443}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openobserve-collector}}
+      ports: [{protocol: TCP, port: 4317}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8        # LAN 10.0.0.0/24 and cluster pod/service CIDRs 10.42/10.43
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports: [{protocol: TCP, port: 443}]

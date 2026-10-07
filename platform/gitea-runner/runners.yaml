@@ -1,0 +1,235 @@
+# Gitea Actions runners (gitea/runner v4.1.0) for https://code.because-security.com.
+# Two registrations; workflows pick one with runs-on:
+#   kube-ax-pods  labels ubuntu-latest, kube-ax: every job is its own pod (no Docker daemon, not privileged)
+#   kube-ax-dind  label  dind: jobs run in a privileged Docker daemon (Docker actions, image builds).
+#                 A job there can break out to the node: use it only for trusted repositories.
+# Priority: everything here is batch-low (1000), below the AX workers (ax-workers, 5000). AX keeps its
+# fixed 3 GiB per node; CI uses what's left and waits: Gitea queues jobs beyond each runner's capacity,
+# and job pods that don't fit stay Pending until room frees up (bounded by the 3h job timeout).
+# The registration token comes from secrets/gitea-runner-token (scripts/gitea-runner.sh).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea-runner
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runner-pods
+  namespace: gitea-runner
+---
+# What the Kubernetes backend needs to run job pods in this namespace (upstream docs/kubernetes.md).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runner-pods
+  namespace: gitea-runner
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runner-pods
+  namespace: gitea-runner
+subjects:
+  - {kind: ServiceAccount, name: runner-pods, namespace: gitea-runner}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: runner-pods}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runner-config
+  namespace: gitea-runner
+data:
+  pods.yaml: |
+    runner:
+      fetch_interval: 2s
+      fetch_interval_max: 30s  # idle backoff: poll Gitea at most every 30s when there's no work
+      capacity: 2              # jobs beyond this wait in Gitea's queue
+      timeout: 3h
+      shutdown_timeout: 10m
+    kubernetes:
+      namespace: gitea-runner
+      pod_template:
+        spec:
+          priorityClassName: batch-low
+          containers:
+            - name: job
+              resources:
+                requests: {cpu: 250m, memory: 1Gi}   # what must be free for the job to start
+                limits: {memory: 2Gi}
+            - name: $services
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {memory: 512Mi}
+  dind.yaml: |
+    runner:
+      fetch_interval: 2s
+      fetch_interval_max: 30s  # idle backoff: poll Gitea at most every 30s when there's no work
+      capacity: 1
+      timeout: 3h
+      shutdown_timeout: 10m
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: runner-pods
+  namespace: gitea-runner
+  labels: {app: gitea-runner, runner: pods}
+spec:
+  serviceName: runner-pods
+  replicas: 1
+  selector:
+    matchLabels: {app: gitea-runner, runner: pods}
+  template:
+    metadata:
+      labels: {app: gitea-runner, runner: pods}
+    spec:
+      serviceAccountName: runner-pods
+      priorityClassName: batch-low
+      terminationGracePeriodSeconds: 900   # above shutdown_timeout
+      containers:
+        - name: runner
+          image: gitea/runner:4.1.0
+          env:
+            - {name: GITEA_INSTANCE_URL, value: "https://code.because-security.com"}
+            - {name: GITEA_RUNNER_NAME, value: kube-ax-pods}
+            - {name: GITEA_RUNNER_REGISTRATION_TOKEN_FILE, value: /secret/token}
+            - {name: CONFIG_FILE, value: /config/pods.yaml}
+            - name: GITEA_RUNNER_LABELS
+              value: >-
+                ubuntu-latest:kubernetes://docker.gitea.com/runner-images:ubuntu-latest,kube-ax:kubernetes://docker.gitea.com/runner-images:ubuntu-latest
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: token, mountPath: /secret, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: runner-config}
+        - name: token
+          secret: {secretName: runner-secret}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: runner-dind
+  namespace: gitea-runner
+  labels: {app: gitea-runner, runner: dind}
+spec:
+  serviceName: runner-dind
+  replicas: 1
+  selector:
+    matchLabels: {app: gitea-runner, runner: dind}
+  template:
+    metadata:
+      labels: {app: gitea-runner, runner: dind}
+    spec:
+      priorityClassName: batch-low
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 900
+      # kube-01 keeps its storage LV for Postgres; the Docker cache lives on kube-02.
+      nodeSelector: {kubernetes.io/hostname: kube-02}
+      volumes:
+        - {name: docker-socket, emptyDir: {}}
+        - name: config
+          configMap: {name: runner-config}
+        - name: token
+          secret: {secretName: runner-secret}
+      initContainers:
+        - name: docker               # native sidecar (restartPolicy: Always)
+          image: docker:28.2.2-dind
+          restartPolicy: Always
+          securityContext: {privileged: true}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}   # idle daemon; jobs burst up to the limit
+            limits: {memory: 2560Mi}
+          volumeMounts:
+            - {name: docker-socket, mountPath: /var/run}
+            - {name: docker-data, mountPath: /var/lib/docker}
+          startupProbe:
+            exec: {command: [/usr/bin/test, -S, /var/run/docker.sock]}
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            exec: {command: [/usr/bin/test, -S, /var/run/docker.sock]}
+      containers:
+        - name: runner
+          image: gitea/runner:4.1.0
+          env:
+            - {name: GITEA_INSTANCE_URL, value: "https://code.because-security.com"}
+            - {name: GITEA_RUNNER_NAME, value: kube-ax-dind}
+            - {name: GITEA_RUNNER_REGISTRATION_TOKEN_FILE, value: /secret/token}
+            - {name: CONFIG_FILE, value: /config/dind.yaml}
+            - {name: GITEA_RUNNER_LABELS, value: "dind:docker://docker.gitea.com/runner-images:ubuntu-latest"}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: docker-socket, mountPath: /var/run}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: token, mountPath: /secret, readOnly: true}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+    - metadata: {name: docker-data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 15Gi}}
+---
+# CI pods reach the internet but nothing internal: not the LAN, not AX/Substrate services. The
+# pods runner additionally reaches the Kubernetes API (it creates job pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-internet-only
+  namespace: gitea-runner
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+                     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runner-pods-kube-api
+  namespace: gitea-runner
+spec:
+  podSelector:
+    matchLabels: {runner: pods}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: {cidr: 10.0.0.63/32}   # k3s API server (the kubernetes Service DNATs here)
+      ports: [{protocol: TCP, port: 6443}]

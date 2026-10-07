@@ -1,0 +1,270 @@
+# Relabel regexes below are copied verbatim from the chart and can't be wrapped.
+# yamllint disable rule:line-length
+# Sizing overlay for the openobserve/openobserve-collector chart (Requirement 12, 17).
+# Upstream leaves agent/gateway without requests/limits and lets memory_limiter grow to
+# 512 MiB per node / 1 GiB for the gateway; on 6 GiB nodes that is most of the headroom.
+# memory_limiter stays ~80% of the container limit so the collector sheds load before OOM.
+#
+# Streams: nothing goes to OpenObserve's `default` streams. Logs -> k3s_logs, traces ->
+# k3s_traces, Kubernetes events/objects -> k3s_events (exporter `stream-name` headers, set in
+# scripts/openobserve.sh next to the credentials). OpenObserve names metric streams after the
+# metric, so transform/k3s_prefix renames every metric to k3s_<name>.
+#
+# Idle trimming (operator decision 2026-10-04): every collection/scrape interval is 60s instead of
+# the chart's 30s. gateway.receivers.prometheus is the chart 0.5.0 scrape list with only
+# scrape_interval changed (Helm replaces lists, so it has to be complete).
+# Gateway watches only events/pods/nodes/deployments (chart: 28 object kinds) to cut its memory.
+k8sCluster: kube-ax
+agent:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  processors:
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 200
+      spike_limit_mib: 50
+    transform/k3s_prefix:
+      metric_statements:
+      - context: metric
+        statements:
+        - set(name, Concat(["k3s_", name], ""))
+  service:
+    pipelines:
+      logs:
+        exporters:
+        - otlphttp/openobserve_logs
+      metrics:
+        processors:
+        - memory_limiter
+        - resourcedetection
+        - attributes
+        - k8sattributes
+        - transform/k3s_prefix
+        - batch
+  receivers:
+    hostmetrics:
+      collection_interval: 60s
+    kubeletstats:
+      collection_interval: 60s
+gateway:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 384Mi
+  processors:
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 300
+      spike_limit_mib: 75
+    transform/k3s_prefix:
+      metric_statements:
+      - context: metric
+        statements:
+        - set(name, Concat(["k3s_", name], ""))
+  service:
+    pipelines:
+      metrics:
+        processors:
+        - memory_limiter
+        - resourcedetection
+        - attributes
+        - k8sattributes
+        - transform/k3s_prefix
+        - batch
+      traces:
+        exporters:
+        - otlphttp/openobserve_traces
+        - servicegraph
+      logs/k8s_events:
+        receivers:
+        - k8sobjects/events
+        - k8sobjects/pods
+        - k8sobjects/nodes
+        - k8sobjects/deployments
+  receivers:
+    prometheus:
+      config:
+        scrape_configs:
+        - job_name: cadvisor
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          metrics_path: /metrics/cadvisor
+          tls_config:
+            ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            insecure_skip_verify: true
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+            type: Bearer
+          kubernetes_sd_configs:
+          - role: node
+          metric_relabel_configs:
+          - action: keep
+            regex: container_fs_(reads_total|writes_total|reads_bytes_total|writes_bytes_total)
+            source_labels:
+            - __name__
+          - action: drop
+            regex: .+;
+            separator: ;
+            source_labels:
+            - id
+            - pod
+          relabel_configs:
+          - action: replace
+            replacement: kubelet
+            target_label: job
+          - action: replace
+            source_labels:
+            - __meta_kubernetes_node_name
+            target_label: node
+        - job_name: kube-state-metrics
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          static_configs:
+          - targets:
+            - kube-state-metrics.kube-system.svc.cluster.local:8080
+          metric_relabel_configs:
+          - action: keep
+            regex: kube_(pod_info|pod_created|pod_status_phase|pod_status_ready|pod_status_reason|pod_container_info|pod_container_status_ready|pod_container_status_restarts_total|pod_container_resource_requests|pod_container_resource_limits|pod_container_status_waiting.*|pod_container_status_terminated_reason|pod_owner|pod_spec_volumes_persistentvolumeclaims_info|pod_container_security_context_privileged|pod_container_security_context_run_as_user|pod_container_security_context_run_as_non_root|deployment_status_replicas.*|deployment_spec_replicas|deployment_created|daemonset_created|daemonset_status.*|statefulset_replicas|statefulset_created|statefulset_status.*|replicaset_status.*|replicaset_spec_replicas|replicaset_created|replicaset_owner|replicaset_annotations|service_info|service_created|service_spec_type|service_status_load_balancer_ingress|endpoint_address|node_status_condition|node_status_allocatable|node_info|node_spec_taint|node_created|namespace_status_phase|namespace_created|persistentvolumeclaim_status_phase|persistentvolumeclaim_info|persistentvolumeclaim_access_mode|persistentvolumeclaim_resource_requests_storage_bytes|persistentvolumeclaim_created|persistentvolume_info|persistentvolume_created|persistentvolume_status_phase|persistentvolume_capacity_bytes|persistentvolume_access_mode|persistentvolume_reclaim_policy|horizontalpodautoscaler_info|horizontalpodautoscaler_created|horizontalpodautoscaler_status.*|horizontalpodautoscaler_spec.*|job_info|job_created|job_status.*|job_spec.*|job_complete|job_failed|job_owner|cronjob_info|cronjob_created|cronjob_status_active|cronjob_spec_suspend|cronjob_next_schedule_time|ingress_info|ingress_created|ingress_path|ingress_tls|ingress_labels|networkpolicy_created|networkpolicy_spec_ingress_rules|networkpolicy_spec_egress_rules|resourcequota|limitrange|serviceaccount_info|serviceaccount_created)
+            source_labels:
+            - __name__
+        - job_name: coredns
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+              - kube-system
+          relabel_configs:
+          - source_labels:
+            - __meta_kubernetes_service_name
+            action: keep
+            regex: kube-dns
+          - source_labels:
+            - __meta_kubernetes_endpoint_port_name
+            action: keep
+            regex: metrics
+        - job_name: kube-apiserver
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          tls_config:
+            ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+            type: Bearer
+          kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+              - default
+          relabel_configs:
+          - source_labels:
+            - __meta_kubernetes_service_name
+            - __meta_kubernetes_endpoint_port_name
+            action: keep
+            regex: kubernetes;https
+          metric_relabel_configs:
+          - action: keep
+            regex: apiserver_(request_total|request_duration_seconds_bucket|request_duration_seconds_count|admission_webhook_request_total|current_inflight_requests|client_certificate_expiration_seconds.*)|process_resident_memory_bytes|process_cpu_seconds_total|kubernetes_build_info
+            source_labels:
+            - __name__
+        - job_name: kube-scheduler
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          tls_config:
+            insecure_skip_verify: true
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+            type: Bearer
+          kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+              - kube-system
+          relabel_configs:
+          - source_labels:
+            - __meta_kubernetes_pod_label_component
+            action: keep
+            regex: kube-scheduler
+          - source_labels:
+            - __address__
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:10259
+            target_label: __address__
+          - source_labels:
+            - __meta_kubernetes_pod_node_name
+            target_label: node
+        - job_name: kube-controller-manager
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 10s
+          tls_config:
+            insecure_skip_verify: true
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+            type: Bearer
+          kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+              - kube-system
+          relabel_configs:
+          - source_labels:
+            - __meta_kubernetes_pod_label_component
+            action: keep
+            regex: kube-controller-manager
+          - source_labels:
+            - __address__
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:10257
+            target_label: __address__
+          - source_labels:
+            - __meta_kubernetes_pod_node_name
+            target_label: node
+        - job_name: prometheus-autodiscovery
+          scrape_interval: 60s
+          kubernetes_sd_configs:
+          - role: pod
+          relabel_configs:
+          - source_labels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+            action: keep
+            regex: 'true'
+          - source_labels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_path
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels:
+            - __address__
+            - __meta_kubernetes_pod_annotation_prometheus_io_port
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_scheme
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
+          - source_labels:
+            - __meta_kubernetes_namespace
+            target_label: namespace
+          - source_labels:
+            - __meta_kubernetes_pod_name
+            target_label: pod
+          - source_labels:
+            - __meta_kubernetes_pod_label_app_kubernetes_io_name
+            target_label: service

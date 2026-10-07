@@ -1,0 +1,3 @@
+# Public repository: no allowlist. Credentials live in gitignored secrets/ and kubeconfig/.
+[extend]
+useDefault = true

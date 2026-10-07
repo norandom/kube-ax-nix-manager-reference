@@ -1,0 +1,13 @@
+# Kubernetes manifests and pre-commit config: syntax and obvious mistakes, not house style.
+extends: default
+ignore: |
+  .cache/
+  .venv/
+rules:
+  line-length: {max: 140, level: warning}
+  document-start: disable
+  truthy: {check-keys: false}
+  comments: {min-spaces-from-content: 1}
+  comments-indentation: disable
+  indentation: {indent-sequences: whatever}
+  braces: {max-spaces-inside: 1}

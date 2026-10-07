@@ -1,0 +1,512 @@
+diff --git a/cmd/atenet/internal/router/egress/egress.go b/cmd/atenet/internal/router/egress/egress.go
+index 0191404..cacb4c0 100644
+--- a/cmd/atenet/internal/router/egress/egress.go
++++ b/cmd/atenet/internal/router/egress/egress.go
+@@ -30,7 +30,9 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"log/slog"
++	"net"
+ 	"net/url"
++	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -182,13 +184,13 @@ func (h *Handler) handleConnect(ctx context.Context, md *extproc.RequestMetadata
+ 	slog.InfoContext(ctx, "egress tunnel opened: requests inside it are decided one by one",
+ 		slog.Any("actor", ref), slog.String("leg", leg), slog.String("destination", md.Host), slog.Int("sniRules", len(rules)))
+ 	res := allow()
+-	res.DynamicMetadata = connectMetadata(rules)
++	res.DynamicMetadata = connectMetadata(dest, rules)
+ 	return res, nil
+ }
+ 
+-// connectMetadata encodes the SNI rules for EgressPolicyMetadataNamespace.
+-// An empty list denies all TLS.
+-func connectMetadata(rules []egresspolicy.SNIRule) *structpb.Struct {
++// connectMetadata encodes the SNI rules for EgressPolicyMetadataNamespace and
++// the dialed destination for EgressMetadataNamespace.
++func connectMetadata(dest egresspolicy.Destination, rules []egresspolicy.SNIRule) *structpb.Struct {
+ 	values := make([]*structpb.Value, len(rules))
+ 	for i, rule := range rules {
+ 		values[i] = structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
+@@ -197,6 +199,9 @@ func connectMetadata(rules []egresspolicy.SNIRule) *structpb.Struct {
+ 		}})
+ 	}
+ 	return &structpb.Struct{Fields: map[string]*structpb.Value{
++		extproc.EgressMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
++			extproc.EgressPassthroughDestinationKey: structpb.NewStringValue(net.JoinHostPort(dest.IP.String(), strconv.Itoa(int(dest.Port)))),
++		}}),
+ 		extproc.EgressPolicyMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
+ 			extproc.EgressSNIRulesKey: structpb.NewListValue(&structpb.ListValue{Values: values}),
+ 		}}),
+diff --git a/cmd/atenet/internal/router/egress/egress_test.go b/cmd/atenet/internal/router/egress/egress_test.go
+index 6fee8c2..a879a2d 100644
+--- a/cmd/atenet/internal/router/egress/egress_test.go
++++ b/cmd/atenet/internal/router/egress/egress_test.go
+@@ -324,10 +324,8 @@ func TestHandleRequestHeadersAllowsVerifiedActor(t *testing.T) {
+ 	if res.Target != "" {
+ 		t.Errorf("target = %q, want %q", res.Target, "")
+ 	}
+-	// Nothing is decided at the CONNECT, so the passthrough chain is given
+-	// nothing to dial.
+-	if got := passthroughDestinationOf(res); got != "" {
+-		t.Errorf("passthrough destination = %q, want none", got)
++	if got := passthroughDestinationOf(res); got != "93.184.216.34:80" {
++		t.Errorf("passthrough destination = %q, want %q", got, "93.184.216.34:80")
+ 	}
+ }
+ 
+@@ -337,8 +335,8 @@ func passthroughDestinationOf(res extproc.Result) string {
+ 	return res.DynamicMetadata.GetFields()[extproc.EgressMetadataNamespace].GetStructValue().GetFields()[extproc.EgressPassthroughDestinationKey].GetStringValue()
+ }
+ 
+-// The CONNECT opens for any policy with rules and returns the https SNI rules
+-// for the dialed port, most specific first.
++// The CONNECT opens for any policy with rules and returns the https and
++// tls_passthrough SNI rules for the dialed port, most specific first.
+ func TestConnectLegOpensForAnyRules(t *testing.T) {
+ 	ca := newTestCA(t, "actor-identity-ca")
+ 	leaf := ca.issueActorCert(t, "spiffe://substrate-actor.local/ateom-for-actor/foo/bar", actorCertOptions{})
+@@ -350,6 +348,13 @@ func TestConnectLegOpensForAnyRules(t *testing.T) {
+ 		}
+ 		return rules
+ 	}
++	passthrough := func(patterns ...string) []egresspolicy.SNIRule {
++		rules := make([]egresspolicy.SNIRule, len(patterns))
++		for i, p := range patterns {
++			rules[i] = egresspolicy.SNIRule{Pattern: p, Mode: egresspolicy.SNIModePassthrough}
++		}
++		return rules
++	}
+ 	tests := []struct {
+ 		name   string
+ 		policy *ateapipb.EgressPolicy
+@@ -359,16 +364,20 @@ func TestConnectLegOpensForAnyRules(t *testing.T) {
+ 	}{
+ 		{name: "http", policy: httpPolicy("api.example.com")},
+ 		{name: "https", policy: httpsPolicy("api.example.com"), want: mitm("api.example.com")},
+-		{name: "tls passthrough", policy: passthroughPolicy(ports(443), "*")},
++		{name: "tls passthrough", policy: passthroughPolicy(ports(443), "*"), want: passthrough("*")},
+ 		{name: "allow all", policy: allowAllPolicy(), want: mitm("*")},
+ 		{
+-			name: "https rules only, most specific first",
++			name: "https and tls passthrough rules, most specific first",
+ 			policy: combined(
+ 				httpsPolicy("*.example.org", "api.example.com"),
+ 				httpPolicy("plain.example.com"),
+ 				passthroughPolicy(ports(443), "foo.bar.com"),
+ 			),
+-			want: mitm("api.example.com", "*.example.org"),
++			want: []egresspolicy.SNIRule{
++				{Pattern: "api.example.com", Mode: egresspolicy.SNIModeMITM},
++				{Pattern: "foo.bar.com", Mode: egresspolicy.SNIModePassthrough},
++				{Pattern: "*.example.org", Mode: egresspolicy.SNIModeMITM},
++			},
+ 		},
+ 		{name: "https rule on another port", policy: httpsPolicy("api.example.com"), dialed: "93.184.216.34:8443"},
+ 		{name: "https rule on the dialed port", policy: httpsPolicyOnPorts(ports(8443), "api.example.com"), dialed: "93.184.216.34:8443", want: mitm("api.example.com")},
+@@ -386,8 +395,8 @@ func TestConnectLegOpensForAnyRules(t *testing.T) {
+ 			if err != nil {
+ 				t.Fatalf("HandleRequestHeaders() error = %v, want the tunnel to open", err)
+ 			}
+-			if got := passthroughDestinationOf(res); got != "" {
+-				t.Errorf("passthrough destination = %q, want none", got)
++			if got := passthroughDestinationOf(res); got != md.Host {
++				t.Errorf("passthrough destination = %q, want %q", got, md.Host)
+ 			}
+ 			if got := sniRulesOf(t, res); !slices.Equal(got, tc.want) {
+ 				t.Errorf("SNI rules = %v, want %v", got, tc.want)
+@@ -418,8 +427,8 @@ func sniRulesOf(t *testing.T, res extproc.Result) []egresspolicy.SNIRule {
+ 	return out
+ }
+ 
+-// A callout with no filter chain name gets the same answer: the tunnel opens
+-// with nothing to dial, and an actor without a policy is refused.
++// A callout with no filter chain name gets the same answer: the tunnel opens,
++// and an actor without a policy is refused.
+ func TestConnectLegWithoutRequestLegs(t *testing.T) {
+ 	ca := newTestCA(t, "actor-identity-ca")
+ 	leaf := ca.issueActorCert(t, "spiffe://substrate-actor.local/ateom-for-actor/foo/bar", actorCertOptions{})
+@@ -430,8 +439,8 @@ func TestConnectLegWithoutRequestLegs(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("HandleRequestHeaders() error = %v, want the tunnel to open", err)
+ 	}
+-	if got := passthroughDestinationOf(res); got != "" {
+-		t.Errorf("passthrough destination = %q, want none", got)
++	if got := passthroughDestinationOf(res); got != "93.184.216.34:80" {
++		t.Errorf("passthrough destination = %q, want %q", got, "93.184.216.34:80")
+ 	}
+ 	h = New(&egressMockClient{actor: runningActor()}, ca.roots(), 0, nil, "")
+ 	_, err = h.HandleRequestHeaders(context.Background(), agentgatewayEgressMetadata(certificate))
+diff --git a/cmd/ateom-gvisor/main.go b/cmd/ateom-gvisor/main.go
+index a976fd8..bcf745e 100644
+--- a/cmd/ateom-gvisor/main.go
++++ b/cmd/ateom-gvisor/main.go
+@@ -80,7 +80,7 @@ var (
+ 	atunnelEgressListenAddress  = pflag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
+ 	egressGatewayTrustBundle    = pflag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
+ 	readinessListenAddress      = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
+-	maxActors                   = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
++	maxActors                   = pflag.Int("max-actors", 1, "How many actors this worker will host at once") // kube-ax: one engine per worker (upstream default 1000)
+ 
+ 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
+ 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
+diff --git a/cmd/dataplane/envoy/dynamic-modules/egress-policy/src/lib.rs b/cmd/dataplane/envoy/dynamic-modules/egress-policy/src/lib.rs
+index 833db59..271d087 100644
+--- a/cmd/dataplane/envoy/dynamic-modules/egress-policy/src/lib.rs
++++ b/cmd/dataplane/envoy/dynamic-modules/egress-policy/src/lib.rs
+@@ -32,6 +32,9 @@ pub const ATE_EGRESS_FILTER_CHAIN: &[u8] = b"dev.ate.egress.filter_chain";
+ /// Verdict for TLS an https rule allows.
+ pub const ATE_EGRESS_FILTER_CHAIN_MITM: &str = "mitm";
+ 
++/// Verdict for TLS a tls_passthrough rule allows.
++pub const ATE_EGRESS_FILTER_CHAIN_PASSTHROUGH: &str = "passthrough";
++
+ /// Verdict for anything that is not TLS.
+ pub const ATE_EGRESS_FILTER_CHAIN_CLEARTEXT: &str = "cleartext";
+ 
+@@ -41,6 +44,9 @@ pub const ATE_EGRESS_FILTER_CHAIN_DENIED: &str = "denied";
+ /// Mode of a rule whose match terminates the connection.
+ pub const SNI_MODE_MITM: &str = "mitm";
+ 
++/// Mode of a rule whose match forwards the connection without decryption.
++pub const SNI_MODE_PASSTHROUGH: &str = "passthrough";
++
+ /// Transport protocol tls_inspector sets for TLS.
+ const TRANSPORT_TLS: &str = "tls";
+ 
+@@ -113,6 +119,7 @@ pub fn tls_verdict(policy: Option<&EgressPolicy>, sni: Option<&str>) -> &'static
+     .find(|rule| pattern_matches(&rule.pattern, &hostname))
+   {
+     Some(rule) if rule.mode == SNI_MODE_MITM => ATE_EGRESS_FILTER_CHAIN_MITM,
++    Some(rule) if rule.mode == SNI_MODE_PASSTHROUGH => ATE_EGRESS_FILTER_CHAIN_PASSTHROUGH,
+     _ => ATE_EGRESS_FILTER_CHAIN_DENIED,
+   }
+ }
+@@ -291,11 +298,19 @@ mod tests {
+       tls_verdict(Some(&unknown_first), Some("api.example.com")),
+       ATE_EGRESS_FILTER_CHAIN_DENIED
+     );
+-    let known_first = policy(&[("api.example.com", SNI_MODE_MITM), ("*.example.com", "not-a-mode")]);
++    let known_first = policy(&[
++      ("api.example.com", SNI_MODE_MITM),
++      ("pinned.example.com", SNI_MODE_PASSTHROUGH),
++      ("*.example.com", "not-a-mode"),
++    ]);
+     assert_eq!(
+       tls_verdict(Some(&known_first), Some("api.example.com")),
+       ATE_EGRESS_FILTER_CHAIN_MITM
+     );
++    assert_eq!(
++      tls_verdict(Some(&known_first), Some("pinned.example.com")),
++      ATE_EGRESS_FILTER_CHAIN_PASSTHROUGH
++    );
+     assert_eq!(
+       tls_verdict(Some(&known_first), Some("www.example.com")),
+       ATE_EGRESS_FILTER_CHAIN_DENIED
+diff --git a/internal/egresspolicy/egresspolicy.go b/internal/egresspolicy/egresspolicy.go
+index 337d82a..ba8d9a7 100644
+--- a/internal/egresspolicy/egresspolicy.go
++++ b/internal/egresspolicy/egresspolicy.go
+@@ -17,7 +17,7 @@
+ // matches with, so the two cannot drift.
+ //
+ // Requests are decided here; TLS connections are decided by the dataplane
+-// against SNIRules. tls_passthrough rules match nothing for now.
++// against SNIRules.
+ //
+ // The package is pure: no I/O, no logging.
+ package egresspolicy
+@@ -167,8 +167,12 @@ func (r compiledRule) matchesPort(port uint16) bool {
+ // must match cmd/dataplane/envoy/dynamic-modules/egress-policy.
+ type SNIMode string
+ 
+-// SNIModeMITM terminates TLS and decides each request inside.
+-const SNIModeMITM SNIMode = "mitm"
++const (
++	// SNIModeMITM terminates TLS and decides each request inside.
++	SNIModeMITM SNIMode = "mitm"
++	// SNIModePassthrough forwards TLS without decryption.
++	SNIModePassthrough SNIMode = "passthrough"
++)
+ 
+ // SNIRule is an SNI pattern and the mode applied when it matches first.
+ type SNIRule struct {
+@@ -176,10 +180,8 @@ type SNIRule struct {
+ 	Mode    SNIMode
+ }
+ 
+-// SNIRules returns the https rules for port, most specific first: exact names
+-// before wildcards, then named ports before all ports. Ties keep policy order.
+-// tls_passthrough rules are left out so their names are denied, not
+-// intercepted.
++// SNIRules returns the https and tls_passthrough rules for a dialed port,
++// sorted according to the API tie-breaking rules
+ func (p *Policy) SNIRules(port uint16) []SNIRule {
+ 	type ranked struct {
+ 		rule SNIRule
+@@ -187,12 +189,21 @@ func (p *Policy) SNIRules(port uint16) []SNIRule {
+ 	}
+ 	var entries []ranked
+ 	for _, rule := range p.rules {
+-		if rule.protocol != protocolHTTPS || !rule.matchesPort(port) {
++		if !rule.matchesPort(port) {
++			continue
++		}
++		var mode SNIMode
++		switch rule.protocol {
++		case protocolHTTPS:
++			mode = SNIModeMITM
++		case protocolTLSPassthrough:
++			mode = SNIModePassthrough
++		default:
+ 			continue
+ 		}
+ 		for _, pattern := range rule.patterns {
+ 			entries = append(entries, ranked{
+-				rule: SNIRule{Pattern: pattern.String(), Mode: SNIModeMITM},
++				rule: SNIRule{Pattern: pattern.String(), Mode: mode},
+ 				rank: matchRank{name: pattern.rank(), port: rule.portRank()},
+ 			})
+ 		}
+diff --git a/internal/egresspolicy/egresspolicy_test.go b/internal/egresspolicy/egresspolicy_test.go
+index 0a40d40..9158bc7 100644
+--- a/internal/egresspolicy/egresspolicy_test.go
++++ b/internal/egresspolicy/egresspolicy_test.go
+@@ -411,6 +411,13 @@ func TestSNIRules(t *testing.T) {
+ 		}
+ 		return rules
+ 	}
++	passthrough := func(patterns ...string) []SNIRule {
++		rules := make([]SNIRule, len(patterns))
++		for i, p := range patterns {
++			rules[i] = SNIRule{Pattern: p, Mode: SNIModePassthrough}
++		}
++		return rules
++	}
+ 	tests := []struct {
+ 		name   string
+ 		policy *ateapipb.EgressPolicy
+@@ -419,34 +426,47 @@ func TestSNIRules(t *testing.T) {
+ 	}{
+ 		{name: "no rules", policy: &ateapipb.EgressPolicy{}, port: 443},
+ 		{name: "http rules decide requests, not connections", policy: policy(httpRule("api.example.com")), port: 80},
+-		{name: "tls_passthrough is not decided yet", policy: policy(passthroughRule(ports(443), "tls.example.com", "*")), port: 443},
++		{name: "tls_passthrough on a named port", policy: policy(passthroughRule(ports(443), "tls.example.com", "*")), port: 443, want: passthrough("tls.example.com", "*")},
++		{name: "tls_passthrough on all ports", policy: policy(passthroughRule(allPorts(), "tls.example.com")), port: 8443, want: passthrough("tls.example.com")},
+ 		{name: "https on its default port", policy: policy(httpsRule("api.example.com", "*.example.org")), port: 443, want: mitm("api.example.com", "*.example.org")},
+ 		{name: "https default port covers no other", policy: policy(httpsRule("api.example.com")), port: 8443},
+ 		{name: "https on a named port", policy: policy(httpsRuleOnPorts(ports(8443, 9443), "api.example.com")), port: 9443, want: mitm("api.example.com")},
+ 		{name: "https on all ports", policy: policy(httpsRuleOnPorts(allPorts(), "api.example.com")), port: 12345, want: mitm("api.example.com")},
+ 		{
+-			name: "only https rules, only those for the dialed port",
++			name: "https and tls_passthrough rules for the dialed port",
+ 			policy: policy(
+ 				httpsRule("api.example.com"),
+ 				httpsRuleOnPorts(ports(8443), "alt.example.com"),
+ 				httpRule("plain.example.com"),
+ 				passthroughRule(ports(443), "pinned.example.com"),
++				passthroughRule(ports(8443), "other-pinned.example.com"),
+ 			),
+ 			port: 443,
+-			want: mitm("api.example.com"),
++			want: []SNIRule{
++				{Pattern: "api.example.com", Mode: SNIModeMITM},
++				{Pattern: "pinned.example.com", Mode: SNIModePassthrough},
++			},
+ 		},
+ 		{
+-			// Name specificity outranks port specificity.
+-			name: "most specific first",
++			// Name specificity outranks port specificity across https and tls_passthrough.
++			name: "most specific first across https and tls_passthrough",
+ 			policy: policy(
+ 				httpsRule("*"),
+-				httpsRuleOnPorts(allPorts(), "a.example.com"),
++				passthroughRule(allPorts(), "a.example.com"),
+ 				httpsRule("*.example.com"),
+ 				httpsRule("b.example.com"),
+-				httpsRuleOnPorts(allPorts(), "*.example.org"),
++				passthroughRule(ports(443), "*.example.org"),
++				httpsRuleOnPorts(allPorts(), "*.example.net"),
+ 			),
+ 			port: 443,
+-			want: mitm("b.example.com", "a.example.com", "*.example.com", "*.example.org", "*"),
++			want: []SNIRule{
++				{Pattern: "b.example.com", Mode: SNIModeMITM},
++				{Pattern: "a.example.com", Mode: SNIModePassthrough},
++				{Pattern: "*.example.com", Mode: SNIModeMITM},
++				{Pattern: "*.example.org", Mode: SNIModePassthrough},
++				{Pattern: "*.example.net", Mode: SNIModeMITM},
++				{Pattern: "*", Mode: SNIModeMITM},
++			},
+ 		},
+ 		{
+ 			// Patterns rank individually, not per rule, matching
+@@ -458,9 +478,13 @@ func TestSNIRules(t *testing.T) {
+ 		},
+ 		{
+ 			name:   "ties keep policy order",
+-			policy: policy(httpsRule("b.example.com", "a.example.com"), httpsRule("c.example.com")),
++			policy: policy(httpsRule("b.example.com", "a.example.com"), passthroughRule(ports(443), "c.example.com")),
+ 			port:   443,
+-			want:   mitm("b.example.com", "a.example.com", "c.example.com"),
++			want: []SNIRule{
++				{Pattern: "b.example.com", Mode: SNIModeMITM},
++				{Pattern: "a.example.com", Mode: SNIModeMITM},
++				{Pattern: "c.example.com", Mode: SNIModePassthrough},
++			},
+ 		},
+ 		{name: "invalid patterns dropped", policy: policy(httpsRule("good.example.com", "not a hostname")), port: 443, want: mitm("good.example.com")},
+ 	}
+diff --git a/manifests/ate-install/ate-api-server.yaml b/manifests/ate-install/ate-api-server.yaml
+index db4f32b..d681979 100644
+--- a/manifests/ate-install/ate-api-server.yaml
++++ b/manifests/ate-install/ate-api-server.yaml
+@@ -60,7 +60,7 @@ metadata:
+   name: ate-api-server
+   namespace: ate-system
+ spec:
+-  replicas: 2
++  replicas: 1  # kube-ax: small cluster, idle trimming (upstream 2)
+   strategy:
+     # Update replicas one at a time, create a new one first, then delete the old one.
+     rollingUpdate:
+@@ -123,7 +123,20 @@ spec:
+         # nothing refers to any more, so it needs the same backend atelet reads
+         # and writes them through.
+         - name: ATE_STORAGE_BACKEND
+-          value: "gcs"
++          value: "s3"
++        # kube-ax: snapshots go to the operator's rustfs S3 API at 10.0.0.54:9000 (no GCS).
++        - name: AWS_REGION
++          value: us-east-1
++        - name: AWS_ENDPOINT_URL
++          value: http://10.0.0.54:9000
++        - name: AWS_S3_USE_PATH_STYLE
++          value: "true"
++        - name: AWS_ACCESS_KEY_ID
++          valueFrom:
++            secretKeyRef: {name: ate-s3-credentials, key: access-key}
++        - name: AWS_SECRET_ACCESS_KEY
++          valueFrom:
++            secretKeyRef: {name: ate-s3-credentials, key: secret-key}
+         # OTLP exporter settings are shared by every control plane component;
+         # see manifests/ate-install/ate-otel-config.yaml. Listed first so the
+         # per-developer ConfigMap below can still override a key.
+diff --git a/manifests/ate-install/atelet.yaml b/manifests/ate-install/atelet.yaml
+index ef1064a..b4e407d 100644
+--- a/manifests/ate-install/atelet.yaml
++++ b/manifests/ate-install/atelet.yaml
+@@ -151,12 +151,19 @@ spec:
+       - name: atelet
+         image: ko://github.com/agent-substrate/substrate/cmd/atelet
+         args:
+-        - --gcp-auth-for-image-pulls=true
++        # kube-ax: not on GCP; actor images are public (ghcr.io/norandom).
++        - --gcp-auth-for-image-pulls=false
+         - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+         - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+         - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+         # Graceful shutdown knobs. The sum must fit within
+         # terminationGracePeriodSeconds above.
++        # kube-ax: cap the actor image cache. Every new task-image build is pulled and unpacked per
++        # node; on 2026-10-05 18 versions (14 GiB) filled the node disk and kubelet evicted the cluster.
++        # 10 GiB = OpenUltraSAST's rotation (engine ~5 GB + search 2.1 GB unpacked) plus headroom.
++        - --image-cache-max-bytes=10737418240
++        - --image-cache-high-percent=75
++        - --image-cache-low-percent=65
+         - --drain-delay=0s
+         - --drain-timeout=5m
+         # atelet does no mounts, netlink, device, or namespace operations (those
+@@ -201,7 +208,25 @@ spec:
+         - name: OTEL_RESOURCE_ATTRIBUTES
+           value: k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),k8s.node.name=$(NODE_NAME),service.instance.id=$(POD_UID)
+         - name: ATE_STORAGE_BACKEND
+-          value: "gcs"
++          value: "s3"
++        # kube-ax: snapshots go to the operator's rustfs S3 API at 10.0.0.54:9000 (no GCS).
++        - name: AWS_REGION
++          value: us-east-1
++        - name: AWS_ENDPOINT_URL
++          value: http://10.0.0.54:9000
++        - name: AWS_S3_USE_PATH_STYLE
++          value: "true"
++        # kube-ax: Go soft memory cap + eager GC (measured before: 184-261 MiB per node).
++        - name: GOMEMLIMIT
++          value: "160MiB"
++        - name: GOGC
++          value: "50"
++        - name: AWS_ACCESS_KEY_ID
++          valueFrom:
++            secretKeyRef: {name: ate-s3-credentials, key: access-key}
++        - name: AWS_SECRET_ACCESS_KEY
++          valueFrom:
++            secretKeyRef: {name: ate-s3-credentials, key: secret-key}
+         # OTLP exporter settings are shared by every control plane component;
+         # see manifests/ate-install/ate-otel-config.yaml.
+         envFrom:
+diff --git a/manifests/ate-install/atenet-egress.yaml b/manifests/ate-install/atenet-egress.yaml
+index adecba3..59c4cb3 100644
+--- a/manifests/ate-install/atenet-egress.yaml
++++ b/manifests/ate-install/atenet-egress.yaml
+@@ -700,6 +700,9 @@ spec:
+         args:
+         - router
+         - --mode=egress
++        # kube-ax: a missing policy is cached as deny; 2s (default 10s) keeps the window between
++        # actor start and the egress-watcher attaching its policy short.
++        - --egress-policy-cache-ttl=2s
+         - --namespace=ate-system
+         - --port-extproc=50051
+         - --extproc-address=127.0.0.1
+diff --git a/manifests/ate-install/base/kustomization.yaml b/manifests/ate-install/base/kustomization.yaml
+index 4538b61..2ef8938 100644
+--- a/manifests/ate-install/base/kustomization.yaml
++++ b/manifests/ate-install/base/kustomization.yaml
+@@ -32,5 +32,5 @@ resources:
+   - ../ate-controller.yaml
+   - ../atelet.yaml
+   - ../atenet-router.yaml
+-  - ../atenet-router-monitoring.yaml
++  # kube-ax: PodMonitoring is GKE Managed Prometheus only; router metrics go via OTLP instead.
+   - ../ate-otel-config.yaml
+diff --git a/manifests/ate-install/postgres/postgres.yaml b/manifests/ate-install/postgres/postgres.yaml
+index 14a11ea..91eeb46 100644
+--- a/manifests/ate-install/postgres/postgres.yaml
++++ b/manifests/ate-install/postgres/postgres.yaml
+@@ -101,6 +101,9 @@ spec:
+       labels:
+         app: postgres
+     spec:
++      # kube-ax: pin to the server node; its local-path volume lives there.
++      nodeSelector:
++        kubernetes.io/hostname: kube-01
+       securityContext:
+         # Group ownership of the projected certificate below, and of the data
+         # volume so that a freshly provisioned one is writable. OnRootMismatch
+@@ -205,13 +208,14 @@ spec:
+         # The whole control plane shares this one database; under activation
+         # load it sustains several cores. The kind overlay shrinks this back
+         # down to fit a CI runner.
++        # kube-ax: small nodes (4 vCPU / 8 GiB); size0 activation load is light.
+         resources:
+           requests:
++            cpu: "250m"
++            memory: "384Mi"
++          limits:
+             cpu: "2"
+             memory: "1Gi"
+-          limits:
+-            cpu: "16"
+-            memory: "2Gi"
+       volumes:
+       - name: config
+         configMap:
+@@ -250,4 +254,4 @@ spec:
+           # PANIC that drops every connection. Size also scales provisioned
+           # IOPS/throughput on PD-backed storage classes. The kind overlay
+           # shrinks this claim back down.
+-          storage: 500Gi
++          storage: 8Gi  # kube-ax: on the node's local-path storage LV

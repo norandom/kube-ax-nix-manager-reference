@@ -1,0 +1,82 @@
+{
+  "admin": {
+    "sshKeys": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKeyFixtureKeyFixtureKeyFixtureKey fixture"
+    ],
+    "user": "ops"
+  },
+  "bootMode": "uefi",
+  "disk": "/dev/vda",
+  "diskLayout": {
+    "containerd": "35G",
+    "root": "20G",
+    "storage": "30G"
+  },
+  "hostName": "kube-02",
+  "k3s": {
+    "ateOnContainerd": true,
+    "entryPoint": false,
+    "flannelBackend": "host-gw",
+    "kubelet": {
+      "cpuManagerPolicy": "none",
+      "evictionHard": {
+        "imagefs.available": "15%",
+        "memory.available": "256Mi",
+        "nodefs.available": "10%"
+      },
+      "evictionSoft": {
+        "memory.available": "512Mi"
+      },
+      "evictionSoftGracePeriod": {
+        "memory.available": "1m30s"
+      },
+      "imageGcHigh": 80,
+      "imageGcLow": 60,
+      "kernelMemcgNotification": true,
+      "kubeReserved": {
+        "cpu": "200m",
+        "memory": "256Mi"
+      },
+      "reservedCpus": null,
+      "swapBehavior": "NoSwap",
+      "systemReserved": {
+        "cpu": "200m",
+        "memory": "256Mi"
+      }
+    },
+    "labels": {
+      "topology.kubernetes.io/zone": "kube-02"
+    },
+    "nodeIp": "10.0.0.64",
+    "role": "agent",
+    "serverAddr": "https://10.0.0.63:6443",
+    "tokenFile": "/var/lib/k3s-secrets/token"
+  },
+  "kvm": "amd",
+  "network": {
+    "address": "10.0.0.64/24",
+    "dns": [
+      "10.0.0.1"
+    ],
+    "gateway": "10.0.0.1",
+    "mac": "bc:24:11:00:00:01"
+  },
+  "phase": "k3s",
+  "schema": 1,
+  "tuning": {
+    "cpuMitigations": "auto",
+    "cpuidleHaltpoll": false,
+    "kernelPreempt": "voluntary",
+    "ksm": false,
+    "nofile": {
+      "hard": 524288,
+      "soft": 65536
+    },
+    "softLockupWatchdog": false,
+    "swapMode": "zswap",
+    "sysctl": {},
+    "zramAlgorithm": "lz4",
+    "zramPercent": 25,
+    "zswapSwapfileGb": 4
+  }
+}

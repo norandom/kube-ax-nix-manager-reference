@@ -1,0 +1,22 @@
+# Pinned upstream versions for `just platform` (Requirement 16.7). Bump deliberately.
+
+[substrate]
+repo = "https://github.com/agent-substrate/substrate"
+tag = "v0.3.0-34-g715f2daa"   # git describe; also image tag and ate.dev/substrate-version
+commit = "715f2daa63371a19f54a0e37997569e3c2cb3cb9"   # main, 2026-10-02
+# Has #2019 (tls_passthrough) and #2015 (enforced host names); stops before #2105, which removes
+# snapshotConfig.onResume that AX v0.3.1 sends. Our changes: platform/substrate/kube-ax-edits.py.
+# Rollback: v0.3.0 (ccecc788) + platform/substrate/kube-ax.patch via scripts/substrate-upgrade.sh.
+
+[ax]
+repo = "https://github.com/google/ax"
+tag = "v0.3.1"
+commit = "e70162a34037c221fe6fadefd98308c05a4ad8f3"   # 2026-09-25 release
+
+[tools]
+# Both repos need Go >= 1.27 (go.mod); the local Go 1.26 fetches it via GOTOOLCHAIN.
+go_toolchain = "go1.27.1"
+ko = "v0.19.1"
+
+[images]
+registry = "ghcr.io/norandom"

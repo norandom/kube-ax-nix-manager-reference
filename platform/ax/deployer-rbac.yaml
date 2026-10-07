@@ -1,0 +1,70 @@
+# Least-privilege identity for submitting AX workflows (Requirement 18.5).
+# The ax CLI reaches ax-server via `kubectl port-forward -n ax-system svc/ax-server`, so that is
+# all it needs; plus read-only views of workers/logs for placement and debugging.
+# Note: AX v0.3.1 has no auth of its own, so anyone who can reach ax-server controls all tasks.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ax-deployer
+  namespace: ax-system
+---
+# Long-lived token (rotate: delete this Secret and re-run `just ax-deployer`).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ax-deployer-token
+  namespace: ax-system
+  annotations:
+    kubernetes.io/service-account.name: ax-deployer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ax-deployer
+  namespace: ax-system
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/portforward]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ax-deployer
+  namespace: ax-system
+subjects:
+  - {kind: ServiceAccount, name: ax-deployer, namespace: ax-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ax-deployer}
+---
+# Read-only view of the workers (where tasks run, their logs, pool sizes).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ax-deployer-view
+  namespace: ax-workers
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+  - apiGroups: [ate.dev]
+    resources: [workerpools]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ax-deployer-view
+  namespace: ax-workers
+subjects:
+  - {kind: ServiceAccount, name: ax-deployer, namespace: ax-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ax-deployer-view}
