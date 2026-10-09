@@ -110,6 +110,27 @@ should never fire.
 | Egress: public HTTPS only (NetworkPolicy on Substrate's egress gateway) | tasks can't reach the LAN, the cluster's internal services or other ports |
 | CI job pods: internet only | CI can't reach the LAN or the cluster's internals |
 
+## Alerts: OpenObserve to Discord
+
+OpenObserve checks every 5 minutes and posts to Discord, mentioning the operator:
+
+| Alert | Fires when | Repeats at most |
+|---|---|---|
+| `kube-ax-disk-free-below-25pct` | `/`, the containerd or the storage volume of a node has < 25 % free (10-min average) | hourly |
+| `kube-ax-disk-free-below-15pct` | same, < 15 % (kubelet evicts at 10 % on `/`, 15 % on containerd) | every 30 min |
+| `kube-ax-node-pressure` | a node reports disk or memory pressure, or ≥ 20 pods were evicted in 10 min | every 30 min |
+
+Single evictions don't alert: they are kubelet doing its job. A storm (the 2026-10-05 outage evicted
+~3000 pods) does.
+
+- Set up and changed with `uv run python scripts/openobserve-alerts.py apply` (re-runnable).
+- `discover` shows the disk metrics; `e2e` creates a throwaway alert that must fire, waits for it, and
+  deletes it (verified 2026-10-09: message arrived in Discord).
+- Secrets (gitignored): `secrets/openobserve-admin` (login with alert rights), `secrets/discord-webhook`,
+  `secrets/discord-user-id`.
+- Data: disk from the `hostmetrics` filesystem scraper (`k3s_system_filesystem_usage`, node in
+  `k8s_node_name`); events from `k3s_events` (`body_object_reason`).
+
 ## Checks: `uv run just verify`
 
 These checks fail **while there is still room to act**:
@@ -142,9 +163,10 @@ Use this for a new cache, log, queue, database or workload type:
 
 ## Not covered yet (honest list)
 
-- **No alerts.** The checks only run when someone runs `just verify`. Next step: OpenObserve
-  alerts on disk free < 25% per volume and on pod restart rate (the metrics are already in the
-  `k3s_*` streams).
+- **Event collection can stall.** After the 2026-10-05 outage the telemetry gateway stopped shipping
+  Kubernetes events for 3.5 days (logs kept flowing) until it was restarted on 2026-10-09. The
+  node-pressure alert depends on those events; the disk alerts don't. No alert watches for the gap yet.
+- **No alert on pod restart rate.**
 - **No per-namespace quotas** (ResourceQuota / LimitRange), and several platform pods have no memory
   limit: Substrate's API server, controller, atelet, router and egress gateway; cert-manager;
   Traefik; metrics-server; the OpenTelemetry operator. Only eviction holds them back.

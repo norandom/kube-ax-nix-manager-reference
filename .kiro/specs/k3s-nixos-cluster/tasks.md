@@ -145,7 +145,9 @@
   - [x] 14.3 `terminated-pod-gc-threshold=100`; nightly clean page-cache drop (03:30)
   - [x] 14.4 verify: disk free ≥ 25 %, cache ≤ 11 GiB, `/var/lib/ate` mount source (46 checks)
   - [x] 14.5 `docs/guardrails.md` (rules, outage timeline, per-resource limits, checklist, gaps)
-  - [ ] 14.6 OpenObserve alerts: disk free < 25 % per volume, pod restart rate
+  - [x] 14.6 OpenObserve alerts to Discord: disk free < 25 % / < 15 % per volume, node pressure / eviction storm (`scripts/openobserve-alerts.py`, e2e verified 2026-10-09)
+  - [x] 14.8 Event collection restored (gateway restart; events had stopped 2026-10-05 20:14)
+  - [ ] 14.9 Alerts on missing events and pod restart rate
   - [ ] 14.7 Memory limits for Substrate, cert-manager, Traefik, metrics-server, OTel operator pods
 
 - [x] 15. Substrate upgrade to main `715f2daa` (Req 22)

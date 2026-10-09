@@ -86,3 +86,32 @@ Measured idle (2026-10-04): **0.56 vCPU in total** (kube-01 0.34, kube-02 0.22),
 host's 12 threads. Actual memory in use is ~3.3 GiB; the rest is returned to the host. What remains is mostly k3s's
 own control plane (~0.2 vCPU on kube-01) and Substrate's Postgres polling. Going lower would mean pausing the VMs
 at night, which was deliberately not chosen: jobs at 3 a.m. should still run.
+
+## 8. Telemetry volume (2026-10-09)
+
+OpenObserve keeps one stream per metric name, each with its own write-ahead log, files and compaction.
+Collecting "everything" produced ~554 active metric streams: Go runtime metrics from every scraped
+component, CoreDNS, scheduler, controller-manager, the collectors' own metrics, histogram buckets, and
+every Substrate metric twice (OTLP and Prometheus). The OpenObserve host spent its disk on small files.
+
+Now a single allowlist (`filter/allowlist` in `platform/openobserve/values.yaml`, both collectors) lets
+through only what we use:
+
+| Kept | For |
+|---|---|
+| `system.*`: load, CPU, memory, filesystem, disk and network I/O | node health, the disk alerts |
+| `k8s.node.*`, `k8s.pod.*`: CPU, working set, filesystem, network | per-node and per-pod use |
+| `kube_*`: pod phase, restarts, waiting/terminated reasons, node conditions, replicas, requests/limits | is anything broken or stuck |
+| `ate.*` over OTLP: actor CPU, crashes, image cache, worker pools, scheduling time | Substrate |
+| `traces_service_graph_request_(total\|failed_total)` | the service graph |
+
+The gateway now scrapes only kube-state-metrics (was 7 scrape jobs).
+
+| | Before | After |
+|---|---|---|
+| Metric streams receiving data | ~554 | 37 |
+| Rows written per 4 min | ~180,000 with the first filter, more before | ~3,700 |
+
+To add a metric, extend the regex in `filter/allowlist` (OTTL string: write `.` as `[.]`, a
+backslash escape fails the collector config) and run `uv run just openobserve`. Old streams stay
+in OpenObserve until its retention removes them.

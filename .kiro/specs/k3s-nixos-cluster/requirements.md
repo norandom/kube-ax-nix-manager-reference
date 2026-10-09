@@ -615,7 +615,9 @@ both kubelets ran at ~300 % CPU on the dead-pod backlog; the telemetry gateway w
 6. Every new tenant that grows (cache, log, queue, scratch) SHALL answer the checklist in
    `docs/guardrails.md` (where it writes, its cap, who cleans it and when, limits, a verify check, what
    it leaves behind).
-7. Known gaps (accepted for now): no alerts (checks run only with `just verify`), no per-namespace
+7. Alerts (2026-10-09): OpenObserve to Discord for disk free < 25 % and < 15 % per volume and for node
+   pressure / eviction storms; single evictions do not alert.
+8. Known gaps (accepted for now): no alert on missing events or restart rate, no per-namespace
    quotas, several platform pods without memory limits, no per-pod PID limit.
 
 ### Requirement 22 — Substrate version and upgrades (2026-10-06)

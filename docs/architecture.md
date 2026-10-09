@@ -74,7 +74,7 @@ flowchart TB
 - **AX keeps the old Substrate API address** when the API server pod is replaced; restart AX
   ([upgrading](upgrading-substrate.md#the-one-surprise-clients-keep-the-old-api-server-address)).
 - **Substrate is pinned before upstream #2105** until AX stops sending `onResume` (spec Requirement 22).
-- **No alerts yet**; disk and health checks run with `just verify` ([guardrails](guardrails.md)).
+- **Alerts cover disk and node pressure only** (OpenObserve to Discord); the rest is checked by `just verify` ([guardrails](guardrails.md#alerts-openobserve-to-discord)).
 - **Footprint reporting** (`just footprint`) is not built yet. Numbers in these docs were measured by hand on
   2026-10-04.
 
